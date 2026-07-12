@@ -1,3 +1,6 @@
+"""O objetivo do script é criar um dataquality report da camada Silver, validando tipos 
+de dados, valores e regras de negócio."""
+
 import json
 from datetime import datetime, timezone
 
@@ -7,7 +10,7 @@ from pyspark.sql import functions as F
 from config import SILVER_PATH, DQ_REPORT_PATH
 from spark_session import get_spark_session
 
-
+# Domínio permitido para as colunas
 VALID_TRANSACTION_TYPES = [
     "purchase",
     "sale",
@@ -44,6 +47,8 @@ VALID_LOCATION_REGIONS = [
     "South America",
 ]
 
+# Conjunto de colunas obrigatórias esperadas na Silver
+# Será usado tanto para validar schema quanto campos críticos não nulos
 REQUIRED_COLUMNS = [
     "timestamp",
     "sending_address",
@@ -60,7 +65,7 @@ REQUIRED_COLUMNS = [
     "anomaly",
 ]
 
-
+# Retorna a lista consolidada de falhas
 def get_failed_expectations(validation_result: dict) -> list:
     failed_expectations = []
 
@@ -90,7 +95,8 @@ def get_failed_expectations(validation_result: dict) -> list:
 
     return failed_expectations
 
-
+# Coleta valores distintos de uma coluna para exibir amostras no relatório
+# útil para entender rapidamente quais categorias inválidas apareceram
 def collect_distinct_values(df, column_name: str, limit: int = 20) -> list:
     rows = (
         df.select(column_name)
@@ -114,6 +120,9 @@ def run_data_quality():
             "Data Quality reprovada: a Silver Layer está vazia."
         )
 
+    # Normalização prévia dos dados:
+    # padroniza caixa, remove espaços extras e ajusta formato textual
+    # Isso reduz falsos positivos durante as validações
     df_normalized = (
         df_silver
         .withColumn(
@@ -152,18 +161,23 @@ def run_data_quality():
 
     ge_df = SparkDFDataset(df_normalized)
 
+    # Validação estrutural:
+    # garante que o conjunto de colunas do DataFrame corresponda ao esperado
+    # ingestion_timestamp também é esperado por ter sido criado na Silver
     ge_df.expect_table_columns_to_match_set(
         REQUIRED_COLUMNS + ["ingestion_timestamp"]
     )
-
+    # cada coluna obrigatória deve conter valores não nulos
     for column in REQUIRED_COLUMNS:
         ge_df.expect_column_values_to_not_be_null(column)
 
+    # Garante que location_region não tenha string vazia ou apenas espaços
     ge_df.expect_column_values_to_not_match_regex(
         "location_region",
         r"^\s*$",
     )
 
+    # Valida tipos principais esperados no schema
     ge_df.expect_column_values_to_be_of_type(
         "timestamp",
         "TimestampType",
@@ -260,6 +274,8 @@ def run_data_quality():
         r"^(\d{1,3})(\.\d{1,3}){1,3}$",
     )
 
+    # Garante unicidade composta para evitar duplicidade transacional
+    # A combinação dessas colunas deve identificar unicamente uma transação
     ge_df.expect_compound_columns_to_be_unique(
         [
             "timestamp",
@@ -270,14 +286,18 @@ def run_data_quality():
         ]
     )
 
+    # Executa todas as expectations registradas
+    # SUMMARY retorna uma visão resumida com amostras de valores inesperados
     validation_result = ge_df.validate(
         result_format={
             "result_format": "SUMMARY",
             "partial_unexpected_count": 10,
         }
     )
-
+    # Extrai apenas as expectations que falharam para simplificar o relatório
     failed_expectations = get_failed_expectations(validation_result)
+
+    # Regras condicionais implementadas com PySpark puro:
 
     invalid_transfer_purchase_pattern_df = df_normalized.filter(
         (F.col("transaction_type") == "transfer")
@@ -389,11 +409,16 @@ def run_data_quality():
         .count()
     )
 
+    # Status geral:
+    # só será True se o Great Expectations passar
+    # e se todas as regras condicionais também passarem
     overall_success = (
         validation_result["success"]
         and conditional_rules_success
     )
-
+    
+    # Estrutura final do relatório
+    # Reúne métricas gerais, falhas do GE, falhas condicionais e distribuições
     dq_report = {
         "execution_timestamp_utc": datetime.now(
             timezone.utc

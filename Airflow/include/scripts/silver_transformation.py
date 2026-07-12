@@ -1,3 +1,7 @@
+"""O objetivo do script é realizar a transformação dos dados da camada Bronze para 
+a camada Silver, aplicando validações e ajustes de tipos de dados."""
+
+#Importações
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     DecimalType,
@@ -11,17 +15,24 @@ from spark_session import get_spark_session
 
 
 def transform_to_silver():
-    spark = get_spark_session("bees-silver-transformation")
+    spark = get_spark_session("silver-transformation")
 
     # Garante consistência independentemente do timezone do container
     spark.conf.set("spark.sql.session.timeZone", "UTC")
 
+    # Leitura da camada Bronze:
     df_bronze = (
         spark.read
         .option("header", "true")
         .option("inferSchema", "false")
         .csv(BRONZE_PATH)
     )
+    # Pipeline principal de transformação para a Silver:
+    # 1) Seleciona e normaliza colunas da Bronze (trim, lower, initcap, etc.)
+    # 2) Converte tipos (timestamp, decimal, integer)
+    # 3) Cria colunas derivadas (ex.: ingestion_timestamp)
+    # 4) Remove colunas temporárias
+    # 5) Remove duplicidades
 
     df_silver = (
         df_bronze
@@ -104,7 +115,9 @@ def transform_to_silver():
         .dropDuplicates()
     )
 
-    # Registros que efetivamente podem seguir para a Silver confiável
+    # Filtragem de registros válidos:
+    # Nesta etapa, removemos linhas com problemas estruturais ou de domínio,
+    # garantindo que apenas registros consistentes sigam para a Silver confiável.
     df_valid = (
         df_silver
         .filter(F.col("timestamp").isNotNull())
@@ -135,7 +148,11 @@ def transform_to_silver():
             "high_risk",
         ))
     )
-
+    # Escrita da Silver:
+    # - mode("overwrite"): recria completamente a saída em cada execução
+    # - partitionBy("transaction_type"): particiona fisicamente por tipo de transação,
+    #   otimiza leitura seletiva por tipo (purchase/sale/transfer)
+    # - parquet(SILVER_PATH): grava em formato colunar Parquet na camada Silver
     (
         df_valid.write
         .mode("overwrite")

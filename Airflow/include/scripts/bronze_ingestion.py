@@ -1,3 +1,8 @@
+"""O objetivo do script é copiar um arquivo CSV local (já disponível dentro do container do 
+Airflow) para o bucket Bronze no MinIO, usando a API S3 via boto3. A função upload_to_bronze() 
+é usada como task no Airflow para carregar a camada Bronze da arquitetura Medallion."""
+
+##Importações
 import os
 import boto3
 
@@ -11,7 +16,7 @@ from config import (
 
 LOCAL_SOURCE_FILE = "/usr/local/airflow/include/data/df_fraud_credit.csv"
 
-
+## Função para upload do arquivo CSV local para o bucket Bronze no MinIO
 def upload_to_bronze():
     if not os.path.exists(LOCAL_SOURCE_FILE):
         raise FileNotFoundError(

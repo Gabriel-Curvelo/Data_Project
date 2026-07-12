@@ -1,3 +1,7 @@
+"""O objetivo do script é realizar a transformação dos dados da camada Silver para a camada 
+Gold, aplicando agregações e cálculos de métricas."""
+
+#Importações
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
@@ -13,14 +17,23 @@ from spark_session import get_spark_session
 def create_gold_tables():
     spark = get_spark_session("gold-transformation")
 
+    # Lê a camada Silver em formato Parquet, já tipada e validada
     df_silver = spark.read.parquet(SILVER_PATH)
-    
+
+    # Persiste a Silver como tabela Gold bruta (fraud_credit):
+    # - útil como base analítica, mantendo o schema pronto para Trino/Hive
     (
         df_silver.write
         .mode("overwrite")
         .parquet(FRAUD_CREDIT_PATH)
     )
 
+    # Tabela Gold 2: agregações por região (location_region)
+    # Calcula:
+    # - média do risk_score por região (avg_risk_score)
+    # - total de transações por região (total_transactions)
+    # - quantidade de transações suspeitas (anomaly != low_risk)
+    # Em seguida ordena pela média de risk_score em ordem decrescente
     risk_score_by_region = (
         df_silver
         .groupBy("location_region")
@@ -60,6 +73,11 @@ def create_gold_tables():
         .drop("row_number")
     )
 
+    # Tabela Gold 3: top 3 receiving_address por valor de amount
+    # - Considera apenas a venda mais recente por endereço 
+    # - Ordena por amount desc, depois timestamp desc 
+    # - Seleciona apenas receiving_address, amount e timestamp
+    # - Limita a 3 linhas (top 3)
     top_3_receiving_addresses = (
         latest_sale_per_address
         .select(

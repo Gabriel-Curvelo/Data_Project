@@ -139,7 +139,8 @@ Após a carga dos dados, as tabelas externas podem ser registradas no Hive Metas
 Na pasta `DataLake`, execute:
 
 ```powershell
-Get-Content .\sql\register_medallion_tables.sql | docker exec -i trino trino --execute
+Get-Content .\sql\register_medallion_tables.sql -Raw `
+| docker exec -i trino trino
 ```
 
 Para validar:

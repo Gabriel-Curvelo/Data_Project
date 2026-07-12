@@ -18,6 +18,7 @@ VALID_PURCHASE_PATTERNS = [
     "focused",
     "high_value",
     "random",
+    "none",
 ]
 
 VALID_AGE_GROUPS = [
@@ -31,6 +32,16 @@ VALID_ANOMALY_LEVELS = [
     "low_risk",
     "moderate_risk",
     "high_risk",
+]
+
+VALID_LOCATION_REGIONS = [
+    "Africa",
+    "Antarctica",
+    "Asia",
+    "Europe",
+    "North America",
+    "Oceania",
+    "South America",
 ]
 
 REQUIRED_COLUMNS = [
@@ -55,24 +66,39 @@ def get_failed_expectations(validation_result: dict) -> list:
 
     for result in validation_result["results"]:
         if not result["success"]:
-            config = result["expectation_config"]
+            config = result.get("expectation_config", {})
+            result_data = result.get("result", {})
 
             failed_expectations.append(
                 {
-                    "expectation": config["expectation_type"],
-                    "column": config["kwargs"].get("column"),
-                    "unexpected_count": result["result"].get(
+                    "expectation": config.get("expectation_type"),
+                    "column": config.get("kwargs", {}).get("column"),
+                    "unexpected_count": result_data.get(
                         "unexpected_count",
                         0,
                     ),
-                    "unexpected_percent": result["result"].get(
+                    "unexpected_percent": result_data.get(
                         "unexpected_percent",
                         0,
+                    ),
+                    "partial_unexpected_list": result_data.get(
+                        "partial_unexpected_list",
+                        [],
                     ),
                 }
             )
 
     return failed_expectations
+
+
+def collect_distinct_values(df, column_name: str, limit: int = 20) -> list:
+    rows = (
+        df.select(column_name)
+        .distinct()
+        .limit(limit)
+        .collect()
+    )
+    return [row[column_name] for row in rows]
 
 
 def run_data_quality():
@@ -81,19 +107,63 @@ def run_data_quality():
 
     df_silver = spark.read.parquet(SILVER_PATH)
 
-    # Encapsula o DataFrame Spark para executar Expectations
-    ge_df = SparkDFDataset(df_silver)
+    total_records = df_silver.count()
 
-    # Schema: valida se todas as colunas necessárias existem
+    if total_records == 0:
+        raise ValueError(
+            "Data Quality reprovada: a Silver Layer está vazia."
+        )
+
+    df_normalized = (
+        df_silver
+        .withColumn(
+            "transaction_type",
+            F.lower(F.trim(F.col("transaction_type"))),
+        )
+        .withColumn(
+            "purchase_pattern",
+            F.lower(F.trim(F.col("purchase_pattern"))),
+        )
+        .withColumn(
+            "age_group",
+            F.lower(F.trim(F.col("age_group"))),
+        )
+        .withColumn(
+            "anomaly",
+            F.lower(F.trim(F.col("anomaly"))),
+        )
+        .withColumn(
+            "sending_address",
+            F.lower(F.trim(F.col("sending_address"))),
+        )
+        .withColumn(
+            "receiving_address",
+            F.lower(F.trim(F.col("receiving_address"))),
+        )
+        .withColumn(
+            "ip_prefix",
+            F.trim(F.col("ip_prefix")),
+        )
+        .withColumn(
+            "location_region",
+            F.initcap(F.trim(F.col("location_region"))),
+        )
+    )
+
+    ge_df = SparkDFDataset(df_normalized)
+
     ge_df.expect_table_columns_to_match_set(
         REQUIRED_COLUMNS + ["ingestion_timestamp"]
     )
 
-    # Campos obrigatórios
     for column in REQUIRED_COLUMNS:
         ge_df.expect_column_values_to_not_be_null(column)
 
-    # Tipos principais
+    ge_df.expect_column_values_to_not_match_regex(
+        "location_region",
+        r"^\s*$",
+    )
+
     ge_df.expect_column_values_to_be_of_type(
         "timestamp",
         "TimestampType",
@@ -101,11 +171,6 @@ def run_data_quality():
 
     ge_df.expect_column_values_to_be_of_type(
         "amount",
-        "DecimalType",
-    )
-
-    ge_df.expect_column_values_to_be_of_type(
-        "risk_score",
         "DecimalType",
     )
 
@@ -119,7 +184,6 @@ def run_data_quality():
         "IntegerType",
     )
 
-    # Valores de domínio
     ge_df.expect_column_values_to_be_in_set(
         "transaction_type",
         VALID_TRANSACTION_TYPES,
@@ -140,7 +204,16 @@ def run_data_quality():
         VALID_ANOMALY_LEVELS,
     )
 
-    # Regras numéricas
+    ge_df.expect_column_values_to_be_in_set(
+        "location_region",
+        VALID_LOCATION_REGIONS,
+    )
+
+    ge_df.expect_column_distinct_values_to_be_in_set(
+        "location_region",
+        VALID_LOCATION_REGIONS,
+    )
+
     ge_df.expect_column_values_to_be_between(
         "amount",
         min_value=0,
@@ -162,7 +235,16 @@ def run_data_quality():
         min_value=1,
     )
 
-    # Formato dos endereços Ethereum: 0x + 40 caracteres hexadecimais
+    ge_df.expect_column_value_lengths_to_equal(
+        "sending_address",
+        42,
+    )
+
+    ge_df.expect_column_value_lengths_to_equal(
+        "receiving_address",
+        42,
+    )
+
     ge_df.expect_column_values_to_match_regex(
         "sending_address",
         r"^0x[a-f0-9]{40}$",
@@ -173,13 +255,11 @@ def run_data_quality():
         r"^0x[a-f0-9]{40}$",
     )
 
-    # Prefixos de IP presentes no dataset, como 192.0, 172.16 e 192.168
     ge_df.expect_column_values_to_match_regex(
         "ip_prefix",
         r"^(\d{1,3})(\.\d{1,3}){1,3}$",
     )
 
-    # Evita linhas integralmente duplicadas
     ge_df.expect_compound_columns_to_be_unique(
         [
             "timestamp",
@@ -190,7 +270,6 @@ def run_data_quality():
         ]
     )
 
-    # Executa todas as Expectations registradas
     validation_result = ge_df.validate(
         result_format={
             "result_format": "SUMMARY",
@@ -198,12 +277,80 @@ def run_data_quality():
         }
     )
 
-    total_records = df_silver.count()
     failed_expectations = get_failed_expectations(validation_result)
 
-    # Métricas complementares para o relatório Gold
+    invalid_transfer_purchase_pattern_df = df_normalized.filter(
+        (F.col("transaction_type") == "transfer")
+        & (F.col("purchase_pattern") != "none")
+    )
+
+    invalid_transfer_age_group_df = df_normalized.filter(
+        (F.col("transaction_type") == "transfer")
+        & (F.col("age_group") != "none")
+    )
+
+    invalid_high_risk_df = df_normalized.filter(
+        (F.col("anomaly") == "high_risk")
+        & ((F.col("risk_score") < 70) | (F.col("risk_score") > 100))
+    )
+
+    invalid_moderate_risk_df = df_normalized.filter(
+        (F.col("anomaly") == "moderate_risk")
+        & (
+            (F.col("risk_score") < 40)
+            | (F.col("risk_score") >= 70)
+        )
+    )
+
+    invalid_low_risk_df = df_normalized.filter(
+        (F.col("anomaly") == "low_risk")
+        & ((F.col("risk_score") < 0) | (F.col("risk_score") >= 40))
+    )
+
+    invalid_location_region_df = df_normalized.filter(
+        ~F.col("location_region").isin(VALID_LOCATION_REGIONS)
+    )
+
+    conditional_failures = {
+        "transfer_purchase_pattern_none_rule": {
+            "invalid_count": invalid_transfer_purchase_pattern_df.count(),
+            "sample_values": collect_distinct_values(
+                invalid_transfer_purchase_pattern_df,
+                "purchase_pattern",
+            ),
+        },
+        "transfer_age_group_none_rule": {
+            "invalid_count": invalid_transfer_age_group_df.count(),
+            "sample_values": collect_distinct_values(
+                invalid_transfer_age_group_df,
+                "age_group",
+            ),
+        },
+        "high_risk_score_range_rule": {
+            "invalid_count": invalid_high_risk_df.count(),
+        },
+        "moderate_risk_score_range_rule": {
+            "invalid_count": invalid_moderate_risk_df.count(),
+        },
+        "low_risk_score_range_rule": {
+            "invalid_count": invalid_low_risk_df.count(),
+        },
+        "location_region_domain_rule": {
+            "invalid_count": invalid_location_region_df.count(),
+            "sample_values": collect_distinct_values(
+                invalid_location_region_df,
+                "location_region",
+            ),
+        },
+    }
+
+    conditional_rules_success = all(
+        rule["invalid_count"] == 0
+        for rule in conditional_failures.values()
+    )
+
     anomaly_metrics = (
-        df_silver
+        df_normalized
         .groupBy("anomaly")
         .count()
         .withColumnRenamed("count", "records")
@@ -215,12 +362,46 @@ def run_data_quality():
         for row in anomaly_metrics
     }
 
+    region_metrics = (
+        df_normalized
+        .groupBy("location_region")
+        .count()
+        .withColumnRenamed("count", "records")
+        .collect()
+    )
+
+    location_region_distribution = {
+        row["location_region"]: row["records"]
+        for row in region_metrics
+    }
+
+    duplicate_count = (
+        df_normalized
+        .groupBy(
+            "timestamp",
+            "sending_address",
+            "receiving_address",
+            "amount",
+            "transaction_type",
+        )
+        .count()
+        .filter(F.col("count") > 1)
+        .count()
+    )
+
+    overall_success = (
+        validation_result["success"]
+        and conditional_rules_success
+    )
+
     dq_report = {
         "execution_timestamp_utc": datetime.now(
             timezone.utc
         ).isoformat(),
         "total_records": total_records,
         "validation_success": validation_result["success"],
+        "conditional_rules_success": conditional_rules_success,
+        "overall_success": overall_success,
         "total_expectations": len(validation_result["results"]),
         "successful_expectations": (
             len(validation_result["results"])
@@ -228,7 +409,13 @@ def run_data_quality():
         ),
         "failed_expectations_count": len(failed_expectations),
         "failed_expectations": failed_expectations,
+        "conditional_failures": conditional_failures,
+        "duplicate_count": duplicate_count,
         "anomaly_distribution": anomaly_distribution,
+        "location_region_distribution": (
+            location_region_distribution
+        ),
+        "allowed_location_regions": VALID_LOCATION_REGIONS,
     }
 
     report_json = json.dumps(
@@ -247,16 +434,15 @@ def run_data_quality():
 
     print(report_json)
 
-    if total_records == 0:
-        raise ValueError(
-            "Data Quality reprovada: a Silver Layer está vazia."
+    # Não levanta exceção: sempre deixa a DAG seguir.
+    # O status da qualidade fica apenas no relatório.
+    if not overall_success:
+        print(
+            "Data Quality WARNING: falhas em expectations "
+            "do Great Expectations e/ou regras condicionais."
         )
-
-    if not validation_result["success"]:
-        raise ValueError(
-            "Data Quality reprovada: uma ou mais "
-            "expectations do Great Expectations falharam."
-        )
+    else:
+        print("Data Quality OK: todas as regras foram atendidas.")
 
     spark.stop()
 

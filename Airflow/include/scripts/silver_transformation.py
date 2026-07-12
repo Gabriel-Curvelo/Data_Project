@@ -116,7 +116,7 @@ def transform_to_silver():
             "sale",
             "transfer",
         ))
-        .filter(F.col("location_region").isNotNull() & (F.col("location_region") != "0"))
+        .filter(F.col("location_region").isNotNull())
         .filter(
             F.col("risk_score").isNotNull()
             & F.col("risk_score").between(0, 100)
